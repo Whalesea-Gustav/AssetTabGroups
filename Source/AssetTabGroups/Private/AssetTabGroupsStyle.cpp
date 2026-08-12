@@ -53,10 +53,8 @@ TSharedRef<FSlateStyleSet> FAssetTabGroupsStyle::Create()
 
 #if ENGINE_MAJOR_VERSION >= 5
 	const ISlateStyle& EditorStyle = FAppStyle::Get();
-	Style->SetParentStyleName(FAppStyle::GetAppStyleSetName());
 #else
 	const ISlateStyle& EditorStyle = FEditorStyle::Get();
-	Style->SetParentStyleName(FEditorStyle::GetStyleSetName());
 #endif
 
 	Style->Set(TEXT("AssetTabGroups.GroupBorder"), new FSlateBrush(*EditorStyle.GetBrush(TEXT("ToolPanel.GroupBorder"))));
