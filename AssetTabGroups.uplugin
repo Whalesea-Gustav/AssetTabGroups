@@ -1,0 +1,18 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Asset Tab Groups",
+	"Description": "Organize and restore groups of open asset editors.",
+	"Category": "Editor",
+	"CreatedBy": "Morefun",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Modules": [
+		{
+			"Name": "AssetTabGroups",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
