@@ -314,6 +314,57 @@ bool FAssetTabGroupRepository::RemoveMember(const FGuid& GroupId, const FString&
 	return CommitChange();
 }
 
+bool FAssetTabGroupRepository::RemoveMembers(
+	const FGuid& GroupId,
+	const TArray<FString>& InAssetPaths,
+	int32* OutRemovedCount)
+{
+	if (OutRemovedCount != nullptr)
+	{
+		*OutRemovedCount = 0;
+	}
+
+	FAssetTabGroup* Group = FindGroup(GroupId);
+	if (Group == nullptr)
+	{
+		return false;
+	}
+
+	TSet<FString> AssetPathsToRemove;
+	for (const FString& AssetPath : InAssetPaths)
+	{
+		if (!AssetPath.IsEmpty())
+		{
+			AssetPathsToRemove.Add(AssetPath);
+		}
+	}
+	if (AssetPathsToRemove.Num() == 0)
+	{
+		return true;
+	}
+
+	const int32 RemovedCount = Group->Members.RemoveAll(
+		[&AssetPathsToRemove](const FAssetTabGroupMember& Member)
+		{
+			return AssetPathsToRemove.Contains(Member.AssetPath);
+		});
+	if (OutRemovedCount != nullptr)
+	{
+		*OutRemovedCount = RemovedCount;
+	}
+	if (RemovedCount == 0)
+	{
+		return true;
+	}
+
+	if (AssetPathsToRemove.Contains(Group->ActiveAssetPath))
+	{
+		Group->ActiveAssetPath = Group->Members.Num() > 0 ? Group->Members[0].AssetPath : FString();
+	}
+	Group->UpdatedAtEpochMs = GetNowEpochMilliseconds();
+	return CommitChange();
+}
+
 bool FAssetTabGroupRepository::SetActiveAsset(const FGuid& GroupId, const FString& InAssetPath)
 {
 	FAssetTabGroup* Group = FindGroup(GroupId);

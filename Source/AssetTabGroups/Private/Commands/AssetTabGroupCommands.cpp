@@ -139,6 +139,37 @@ bool FAssetTabGroupCommands::RemoveMemberFromGroup(const FGuid& GroupId, const F
 	return bResult && bRemoved;
 }
 
+bool FAssetTabGroupCommands::RemoveMembersFromGroup(
+	const FGuid& GroupId,
+	const TArray<FString>& AssetPaths,
+	int32* OutRemovedCount)
+{
+	int32 RemovedCount = 0;
+	const bool bResult = Subsystem.GetRepository().RemoveMembers(GroupId, AssetPaths, &RemovedCount);
+	if (OutRemovedCount != nullptr)
+	{
+		*OutRemovedCount = RemovedCount;
+	}
+
+	if (!bResult)
+	{
+		Notify(NSLOCTEXT("AssetTabGroups", "RemoveAssetsFailed", "Failed to remove the selected assets from the group."), false);
+		return false;
+	}
+
+	if (RemovedCount == 0)
+	{
+		Notify(NSLOCTEXT("AssetTabGroups", "NoSelectedAssetsRemoved", "The selected assets are no longer members of this group."), false);
+		return false;
+	}
+
+	Notify(
+		FText::Format(
+			NSLOCTEXT("AssetTabGroups", "RemovedAssets", "Removed {0} assets from the group."),
+			FText::AsNumber(RemovedCount)));
+	return true;
+}
+
 bool FAssetTabGroupCommands::DeleteGroup(const FGuid& GroupId)
 {
 	const bool bResult = Subsystem.GetRepository().DeleteGroup(GroupId);

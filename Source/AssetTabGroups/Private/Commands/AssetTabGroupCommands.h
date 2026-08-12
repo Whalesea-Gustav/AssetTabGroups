@@ -38,6 +38,7 @@ public:
 	bool AddMembersToGroup(const FGuid& GroupId, const TArray<FAssetTabGroupMember>& InMembers, int32* OutAddedCount = nullptr);
 	bool UpdateGroupFromOpenAssets(const FGuid& GroupId);
 	bool RemoveMemberFromGroup(const FGuid& GroupId, const FString& AssetPath);
+	bool RemoveMembersFromGroup(const FGuid& GroupId, const TArray<FString>& AssetPaths, int32* OutRemovedCount = nullptr);
 	bool DeleteGroup(const FGuid& GroupId);
 	bool RenameGroup(const FGuid& GroupId, const FString& InName);
 	bool SetGroupNote(const FGuid& GroupId, const FString& InNote);

@@ -10,7 +10,6 @@ public class AssetTabGroups : ModuleRules
 		{
 			PrivateDependencyModuleNames.Add("EditorStyle");
 		}
-
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{

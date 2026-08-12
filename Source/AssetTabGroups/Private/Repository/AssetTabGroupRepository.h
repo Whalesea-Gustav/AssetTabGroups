@@ -35,6 +35,7 @@ public:
 	bool AddMembers(const FGuid& GroupId, const TArray<FAssetTabGroupMember>& InMembers, int32* OutAddedCount = nullptr);
 	bool ReplaceMembers(const FGuid& GroupId, const TArray<FAssetTabGroupMember>& InMembers, const FString& InActiveAssetPath);
 	bool RemoveMember(const FGuid& GroupId, const FString& InAssetPath, bool* bOutRemoved = nullptr);
+	bool RemoveMembers(const FGuid& GroupId, const TArray<FString>& InAssetPaths, int32* OutRemovedCount = nullptr);
 	bool SetActiveAsset(const FGuid& GroupId, const FString& InAssetPath);
 	bool ReorderGroup(const FGuid& GroupId, int32 NewIndex);
 	bool TouchLastUsed(const FGuid& GroupId);

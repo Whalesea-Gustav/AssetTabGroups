@@ -5,6 +5,7 @@
 #include "AssetTabGroupsCompatibility.h"
 #include "AssetThumbnail.h"
 #include "ContentBrowserModule.h"
+#include "DragAndDrop/DecoratedDragDropOp.h"
 #include "Editor.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
@@ -15,6 +16,7 @@
 #include "Repository/AssetTabGroupRepository.h"
 #include "Session/AssetEditorSessionAdapter.h"
 #include "Styling/CoreStyle.h"
+#include "Runtime/Launch/Resources/Version.h"
 #include "UObject/SoftObjectPath.h"
 #include "Widgets/Colors/SColorBlock.h"
 #include "Widgets/Input/SButton.h"
@@ -24,6 +26,8 @@
 #include "Widgets/Input/SMenuAnchor.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SGridPanel.h"
+#include "Widgets/SOverlay.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SSeparator.h"
 #include "Widgets/Layout/SSpacer.h"
@@ -38,12 +42,270 @@
 
 #define LOCTEXT_NAMESPACE "AssetTabGroups"
 
+#if ENGINE_MAJOR_VERSION < 5
+#define ASSETTABGROUPS_BUTTON_TEXT_STYLE .TextStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.ButtonText"))
+#else
+#define ASSETTABGROUPS_BUTTON_TEXT_STYLE
+#endif
+
 namespace AssetTabGroupsPrivate
 {
 	const FName MemberNameColumnId(TEXT("Name"));
 	const FName MemberTypeColumnId(TEXT("Type"));
 	const FName MemberPackageColumnId(TEXT("Package"));
 	const FName MemberStatusColumnId(TEXT("Status"));
+
+	DECLARE_DELEGATE_RetVal_TwoParams(FReply, FOnGroupDragDetected, const FGeometry&, const FPointerEvent&);
+	DECLARE_DELEGATE_ThreeParams(FOnGroupDropRequested, const FGuid&, const FGuid&, bool);
+	DECLARE_DELEGATE_OneParam(FOnMemberTileSelectionRequested, const FPointerEvent&);
+
+	class FAssetTabGroupDragDropOp final : public FDecoratedDragDropOp
+	{
+	public:
+		DRAG_DROP_OPERATOR_TYPE(FAssetTabGroupDragDropOp, FDecoratedDragDropOp)
+
+		FGuid GroupId;
+		FString GroupName;
+
+		static TSharedRef<FAssetTabGroupDragDropOp> New(const FGuid& InGroupId, const FString& GroupName)
+		{
+			TSharedRef<FAssetTabGroupDragDropOp> Operation = MakeShared<FAssetTabGroupDragDropOp>();
+			Operation->GroupId = InGroupId;
+			Operation->GroupName = GroupName;
+			Operation->Construct();
+			return Operation;
+		}
+
+		virtual TSharedPtr<SWidget> GetDefaultDecorator() const override
+		{
+			return SNew(SBorder)
+				.BorderImage(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.GroupPanelBorder")))
+				.Padding(4.0f)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(GroupName))
+				];
+		}
+	};
+
+	static TSharedRef<SWidget> MakeGroupDragDot()
+	{
+		const FSlateBrush* DragHandleBrush = FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.GroupDragHandle"));
+		return SNew(SColorBlock)
+			.Color(DragHandleBrush->TintColor.GetSpecifiedColor())
+			.Size(FVector2D(3.0f, 3.0f));
+	}
+
+	class SAssetTabGroupDragHandle final : public SCompoundWidget
+	{
+	public:
+		SLATE_BEGIN_ARGS(SAssetTabGroupDragHandle)
+			: _OnDragDetected()
+		{
+		}
+			SLATE_EVENT(FOnGroupDragDetected, OnDragDetected)
+		SLATE_END_ARGS()
+
+		void Construct(const FArguments& InArgs)
+		{
+			OnDragDetectedDelegate = InArgs._OnDragDetected;
+
+			ChildSlot
+			[
+				SNew(SGridPanel)
+				+ SGridPanel::Slot(0, 0)
+				.Padding(1.0f)
+				[
+					MakeGroupDragDot()
+				]
+				+ SGridPanel::Slot(1, 0)
+				.Padding(1.0f)
+				[
+					MakeGroupDragDot()
+				]
+				+ SGridPanel::Slot(0, 1)
+				.Padding(1.0f)
+				[
+					MakeGroupDragDot()
+				]
+				+ SGridPanel::Slot(1, 1)
+				.Padding(1.0f)
+				[
+					MakeGroupDragDot()
+				]
+				+ SGridPanel::Slot(0, 2)
+				.Padding(1.0f)
+				[
+					MakeGroupDragDot()
+				]
+				+ SGridPanel::Slot(1, 2)
+				.Padding(1.0f)
+				[
+					MakeGroupDragDot()
+				]
+			];
+		}
+
+		virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override
+		{
+			if (MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+			{
+				return FReply::Handled().DetectDrag(SharedThis(this), EKeys::LeftMouseButton);
+			}
+
+			return SCompoundWidget::OnMouseButtonDown(MyGeometry, MouseEvent);
+		}
+
+		virtual FReply OnDragDetected(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override
+		{
+			return OnDragDetectedDelegate.IsBound()
+				? OnDragDetectedDelegate.Execute(MyGeometry, MouseEvent)
+				: FReply::Unhandled();
+		}
+
+	private:
+		FOnGroupDragDetected OnDragDetectedDelegate;
+	};
+
+	class SAssetTabGroupRow final : public STableRow<TSharedPtr<FGuid>>
+	{
+	public:
+		SLATE_BEGIN_ARGS(SAssetTabGroupRow)
+			: _GroupId()
+			, _OnDropRequested()
+		{
+		}
+			SLATE_ARGUMENT(TSharedPtr<FGuid>, GroupId)
+			SLATE_EVENT(FOnGroupDropRequested, OnDropRequested)
+			SLATE_DEFAULT_SLOT(FArguments, Content)
+		SLATE_END_ARGS()
+
+		void Construct(const FArguments& InArgs, const TSharedRef<STableViewBase>& OwnerTable)
+		{
+			GroupId = InArgs._GroupId;
+			OnDropRequested = InArgs._OnDropRequested;
+
+			TSharedRef<SOverlay> RowOverlay = SNew(SOverlay);
+			RowOverlay->AddSlot()
+			[
+				InArgs._Content.Widget
+			];
+			RowOverlay->AddSlot()
+			.Padding(1.0f)
+			[
+				SNew(SColorBlock)
+				.Color_Lambda([this]()
+				{
+					return bDragOver
+						? FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.GroupDropIndicator"))->TintColor.GetSpecifiedColor().CopyWithNewOpacity(0.10f)
+						: FLinearColor::Transparent;
+				})
+				.Visibility_Lambda([this]()
+				{
+					return bDragOver ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+				})
+			];
+			RowOverlay->AddSlot()
+			.VAlign(VAlign_Top)
+			[
+				SNew(SBox)
+				.HeightOverride(2.0f)
+				[
+					SNew(SColorBlock)
+					.Color(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.GroupDropIndicator"))->TintColor.GetSpecifiedColor())
+					.Visibility_Lambda([this]()
+					{
+						return bDragOver && !bDropAfter ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+					})
+				]
+			];
+			RowOverlay->AddSlot()
+			.VAlign(VAlign_Bottom)
+			[
+				SNew(SBox)
+				.HeightOverride(2.0f)
+				[
+					SNew(SColorBlock)
+					.Color(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.GroupDropIndicator"))->TintColor.GetSpecifiedColor())
+					.Visibility_Lambda([this]()
+					{
+						return bDragOver && bDropAfter ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+					})
+				]
+			];
+
+			using FRowType = STableRow<TSharedPtr<FGuid>>;
+			FRowType::Construct(
+				FRowType::FArguments()
+				.Style(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.TableRow"))
+				[
+					RowOverlay
+				],
+				OwnerTable);
+		}
+
+		virtual void OnDragEnter(FGeometry const& MyGeometry, FDragDropEvent const& DragDropEvent) override
+		{
+			UpdateDragState(MyGeometry, DragDropEvent);
+		}
+
+		virtual void OnDragLeave(FDragDropEvent const& DragDropEvent) override
+		{
+			bDragOver = false;
+			Invalidate(EInvalidateWidget::Paint);
+			STableRow<TSharedPtr<FGuid>>::OnDragLeave(DragDropEvent);
+		}
+
+		virtual FReply OnDragOver(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent) override
+		{
+			return UpdateDragState(MyGeometry, DragDropEvent)
+				? FReply::Handled()
+				: FReply::Unhandled();
+		}
+
+		virtual FReply OnDrop(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent) override
+		{
+			const TSharedPtr<FAssetTabGroupDragDropOp> Operation = DragDropEvent.GetOperationAs<FAssetTabGroupDragDropOp>();
+			if (!Operation.IsValid() || !GroupId.IsValid() || Operation->GroupId == *GroupId)
+			{
+				bDragOver = false;
+				Invalidate(EInvalidateWidget::Paint);
+				return FReply::Unhandled();
+			}
+
+			const bool bInsertAfter = bDropAfter;
+			bDragOver = false;
+			Invalidate(EInvalidateWidget::Paint);
+			if (OnDropRequested.IsBound())
+			{
+				OnDropRequested.Execute(*GroupId, Operation->GroupId, bInsertAfter);
+			}
+			return FReply::Handled();
+		}
+
+	private:
+		bool UpdateDragState(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent)
+		{
+			const TSharedPtr<FAssetTabGroupDragDropOp> Operation = DragDropEvent.GetOperationAs<FAssetTabGroupDragDropOp>();
+			if (!Operation.IsValid() || !GroupId.IsValid() || Operation->GroupId == *GroupId)
+			{
+				bDragOver = false;
+				Invalidate(EInvalidateWidget::Paint);
+				return false;
+			}
+
+			const FVector2D LocalPosition = MyGeometry.AbsoluteToLocal(DragDropEvent.GetScreenSpacePosition());
+			bDragOver = true;
+			bDropAfter = LocalPosition.Y >= MyGeometry.GetLocalSize().Y * 0.5f;
+			Invalidate(EInvalidateWidget::Paint);
+			return true;
+		}
+
+		TSharedPtr<FGuid> GroupId;
+		FOnGroupDropRequested OnDropRequested;
+		bool bDragOver = false;
+		bool bDropAfter = false;
+	};
 
 	class SAssetTabGroupDetailsSurface final : public SCompoundWidget
 	{
@@ -93,16 +355,19 @@ namespace AssetTabGroupsPrivate
 		SLATE_BEGIN_ARGS(SAssetTabGroupMemberTile)
 			: _OnDoubleClicked()
 			, _OnGetMenuContent()
+			, _OnSelectionRequested()
 		{
 		}
 			SLATE_DEFAULT_SLOT(FArguments, Content)
 			SLATE_EVENT(FOnClicked, OnDoubleClicked)
 			SLATE_EVENT(FOnGetContent, OnGetMenuContent)
+			SLATE_EVENT(FOnMemberTileSelectionRequested, OnSelectionRequested)
 		SLATE_END_ARGS()
 
 		void Construct(const FArguments& InArgs)
 		{
 			OnDoubleClicked = InArgs._OnDoubleClicked;
+			OnSelectionRequested = InArgs._OnSelectionRequested;
 
 			ChildSlot
 			[
@@ -117,14 +382,25 @@ namespace AssetTabGroupsPrivate
 
 		virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override
 		{
-			if (MouseEvent.GetEffectingButton() == EKeys::RightMouseButton && MenuAnchor.IsValid())
+			if (MouseEvent.GetEffectingButton() == EKeys::RightMouseButton)
 			{
-				MenuAnchor->SetIsOpen(true);
-				return FReply::Handled();
+				if (OnSelectionRequested.IsBound())
+				{
+					OnSelectionRequested.Execute(MouseEvent);
+				}
+				if (MenuAnchor.IsValid())
+				{
+					MenuAnchor->SetIsOpen(true);
+					return FReply::Handled();
+				}
 			}
 
 			if (MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
 			{
+				if (OnSelectionRequested.IsBound())
+				{
+					OnSelectionRequested.Execute(MouseEvent);
+				}
 				return FReply::Handled();
 			}
 
@@ -143,6 +419,7 @@ namespace AssetTabGroupsPrivate
 
 	private:
 		FOnClicked OnDoubleClicked;
+		FOnMemberTileSelectionRequested OnSelectionRequested;
 		TSharedPtr<SMenuAnchor> MenuAnchor;
 	};
 
@@ -268,47 +545,60 @@ void SAssetTabGroupsPanel::Construct(const FArguments& InArgs)
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.Padding(0.0f, 0.0f, 4.0f, 0.0f)
+				SNew(SBorder)
+				.BorderImage(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.ButtonPanelBorder")))
+				.Padding(1.0f)
 				[
-					SNew(SButton)
-					.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
-					.Text(LOCTEXT("CreateEmptyGroup", "New Group"))
-					.ToolTipText(LOCTEXT("CreateEmptyGroupTooltip", "Create an empty asset group."))
-					.OnClicked_Lambda([this]()
-					{
-						CreateEmptyGroup();
-						return FReply::Handled();
-					})
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.Padding(0.0f, 0.0f, 4.0f, 0.0f)
-				[
-					SNew(SButton)
-					.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
-					.Text(LOCTEXT("SaveAllOpenAssets", "Save All Open"))
-					.ToolTipText(LOCTEXT("SaveAllOpenAssetsTooltip", "Save all currently open asset editors as a new group."))
-					.OnClicked_Lambda([this]()
-					{
-						SaveAllOpenAssets();
-						return FReply::Handled();
-					})
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				[
-					SNew(SButton)
-					.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
-					.Text(LOCTEXT("SaveSelectedOpenAssets", "Save Selected"))
-					.ToolTipText(LOCTEXT("SaveSelectedOpenAssetsTooltip", "Choose currently open assets and save them as a new group."))
-					.OnClicked_Lambda([this]()
-					{
-						SaveSelectedOpenAssets();
-						return FReply::Handled();
-					})
+					SNew(SBorder)
+					.BorderImage(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.PanelBackground")))
+					.Padding(FMargin(4.0f, 3.0f))
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(0.0f, 0.0f, 4.0f, 0.0f)
+						[
+							SNew(SButton)
+							.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
+							ASSETTABGROUPS_BUTTON_TEXT_STYLE
+							.Text(LOCTEXT("CreateEmptyGroup", "New Group"))
+							.ToolTipText(LOCTEXT("CreateEmptyGroupTooltip", "Create an empty asset group."))
+							.OnClicked_Lambda([this]()
+							{
+								CreateEmptyGroup();
+								return FReply::Handled();
+							})
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(0.0f, 0.0f, 4.0f, 0.0f)
+						[
+							SNew(SButton)
+							.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
+							ASSETTABGROUPS_BUTTON_TEXT_STYLE
+							.Text(LOCTEXT("SaveAllOpenAssets", "Save All Open"))
+							.ToolTipText(LOCTEXT("SaveAllOpenAssetsTooltip", "Save all currently open asset editors as a new group."))
+							.OnClicked_Lambda([this]()
+							{
+								SaveAllOpenAssets();
+								return FReply::Handled();
+							})
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						[
+							SNew(SButton)
+							.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
+							ASSETTABGROUPS_BUTTON_TEXT_STYLE
+							.Text(LOCTEXT("SaveSelectedOpenAssets", "Save Selected"))
+							.ToolTipText(LOCTEXT("SaveSelectedOpenAssetsTooltip", "Choose currently open assets and save them as a new group."))
+							.OnClicked_Lambda([this]()
+							{
+								SaveSelectedOpenAssets();
+								return FReply::Handled();
+							})
+						]
+					]
 				]
 			]
 			+ SVerticalBox::Slot()
@@ -326,43 +616,48 @@ void SAssetTabGroupsPanel::Construct(const FArguments& InArgs)
 				.Orientation(EOrientation::Orient_Horizontal)
 				.Style(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.Splitter"))
 				.PhysicalSplitterHandleSize(2.0f)
-				.HitDetectionSplitterHandleSize(2.0f)
+				.HitDetectionSplitterHandleSize(ENGINE_MAJOR_VERSION < 5 ? 8.0f : 2.0f)
 				+ SSplitter::Slot()
 				.Value(0.28f)
 				[
 					SNew(SBorder)
-					.BorderImage(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.PanelBackground")))
-					.Padding(4.0f)
+					.BorderImage(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.GroupPanelBorder")))
+					.Padding(1.0f)
 					[
-						SNew(SVerticalBox)
-						+ SVerticalBox::Slot()
-						.AutoHeight()
-						.Padding(2.0f, 0.0f, 2.0f, 4.0f)
+						SNew(SBorder)
+						.BorderImage(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.PanelBackground")))
+						.Padding(4.0f)
 						[
-							SNew(STextBlock)
-							.Text(LOCTEXT("GroupsHeading", "Asset Groups"))
-							.Font(FCoreStyle::Get().GetFontStyle("BoldFont"))
-						]
-						+ SVerticalBox::Slot()
-						.FillHeight(1.0f)
-						[
-							SAssignNew(GroupListView, SListView<TSharedPtr<FGuid>>)
-							.ListItemsSource(&GroupItems)
-							.OnGenerateRow(this, &SAssetTabGroupsPanel::GenerateGroupRow)
-							.OnSelectionChanged(this, &SAssetTabGroupsPanel::GroupSelectionChanged)
-							.OnContextMenuOpening_Lambda([this]()
-							{
-								const FGuid ContextGroupId = PendingGroupContextMenuId;
-								PendingGroupContextMenuId.Invalidate();
-								if (ContextGroupId.IsValid())
+							SNew(SVerticalBox)
+							+ SVerticalBox::Slot()
+							.AutoHeight()
+							.Padding(2.0f, 0.0f, 2.0f, 4.0f)
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("GroupsHeading", "Asset Groups"))
+								.Font(FCoreStyle::Get().GetFontStyle("BoldFont"))
+							]
+							+ SVerticalBox::Slot()
+							.FillHeight(1.0f)
+							[
+								SAssignNew(GroupListView, SListView<TSharedPtr<FGuid>>)
+								.ListItemsSource(&GroupItems)
+								.OnGenerateRow(this, &SAssetTabGroupsPanel::GenerateGroupRow)
+								.OnSelectionChanged(this, &SAssetTabGroupsPanel::GroupSelectionChanged)
+								.OnContextMenuOpening_Lambda([this]()
 								{
-									return TSharedPtr<SWidget>(MakeGroupMenu(ContextGroupId));
-								}
-								return TSharedPtr<SWidget>(MakeEmptyGroupMenu());
-							})
-							.SelectionMode(ESelectionMode::Single)
-							.ClearSelectionOnClick(true)
-							.ScrollbarVisibility(EVisibility::Visible)
+									const FGuid ContextGroupId = PendingGroupContextMenuId;
+									PendingGroupContextMenuId.Invalidate();
+									if (ContextGroupId.IsValid())
+									{
+										return TSharedPtr<SWidget>(MakeGroupMenu(ContextGroupId));
+									}
+									return TSharedPtr<SWidget>(MakeEmptyGroupMenu());
+								})
+								.SelectionMode(ESelectionMode::Single)
+								.ClearSelectionOnClick(true)
+								.ScrollbarVisibility(EVisibility::Visible)
+							]
 						]
 					]
 				]
@@ -370,10 +665,15 @@ void SAssetTabGroupsPanel::Construct(const FArguments& InArgs)
 				.Value(0.72f)
 				[
 					SNew(SBorder)
-					.BorderImage(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.PanelBackground")))
-					.Padding(6.0f)
+					.BorderImage(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.DetailPanelBorder")))
+					.Padding(1.0f)
 					[
-						SAssignNew(DetailsBox, SVerticalBox)
+						SNew(SBorder)
+						.BorderImage(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.PanelBackground")))
+						.Padding(6.0f)
+						[
+							SAssignNew(DetailsBox, SVerticalBox)
+						]
 					]
 				]
 			]
@@ -444,6 +744,7 @@ void SAssetTabGroupsPanel::RebuildGroupItems()
 		}
 	}
 
+	const FGuid PreviousSelectedGroupId = SelectedGroupId;
 	GroupItems.Reset();
 	const TArray<FAssetTabGroup>& Groups = Subsystem->GetRepository().GetGroups();
 	for (const FAssetTabGroup& Group : Groups)
@@ -454,6 +755,11 @@ void SAssetTabGroupsPanel::RebuildGroupItems()
 	if (!SelectedGroupId.IsValid() || Subsystem->GetRepository().FindGroup(SelectedGroupId) == nullptr)
 	{
 		SelectedGroupId = Groups.Num() > 0 ? Groups[0].Id : FGuid();
+	}
+	if (SelectedGroupId != PreviousSelectedGroupId)
+	{
+		SelectedMemberAssetPaths.Reset();
+		MemberSelectionAnchorAssetPath.Reset();
 	}
 
 	GroupListView->RequestListRefresh();
@@ -498,9 +804,19 @@ void SAssetTabGroupsPanel::RebuildDetails()
 		return;
 	}
 
+	TSet<FString> ValidSelectedMemberPaths;
 	for (const FAssetTabGroupMember& Member : Group->Members)
 	{
 		CurrentMemberItems.Add(MakeShared<FAssetTabGroupMember>(Member));
+		if (SelectedMemberAssetPaths.Contains(Member.AssetPath))
+		{
+			ValidSelectedMemberPaths.Add(Member.AssetPath);
+		}
+	}
+	SelectedMemberAssetPaths = MoveTemp(ValidSelectedMemberPaths);
+	if (!MemberSelectionAnchorAssetPath.IsEmpty() && !SelectedMemberAssetPaths.Contains(MemberSelectionAnchorAssetPath))
+	{
+		MemberSelectionAnchorAssetPath.Reset();
 	}
 
 	DetailsBox->AddSlot()
@@ -522,8 +838,140 @@ void SAssetTabGroupsPanel::GroupSelectionChanged(TSharedPtr<FGuid> GroupId, ESel
 		return;
 	}
 
-	SelectedGroupId = *GroupId;
+	if (SelectedGroupId != *GroupId)
+	{
+		SelectedGroupId = *GroupId;
+		SelectedMemberAssetPaths.Reset();
+		MemberSelectionAnchorAssetPath.Reset();
+	}
 	RebuildDetails();
+}
+
+void SAssetTabGroupsPanel::HandleMemberTileSelection(
+	const FGuid GroupId,
+	const FString& AssetPath,
+	const FPointerEvent& MouseEvent)
+{
+	if (!GroupId.IsValid() || GroupId != SelectedGroupId || AssetPath.IsEmpty())
+	{
+		return;
+	}
+
+	const bool bIsRightClick = MouseEvent.GetEffectingButton() == EKeys::RightMouseButton;
+	const bool bIsControlClick = MouseEvent.IsControlDown();
+	const bool bIsShiftClick = MouseEvent.IsShiftDown();
+	if (bIsRightClick)
+	{
+		if (!SelectedMemberAssetPaths.Contains(AssetPath))
+		{
+			SelectedMemberAssetPaths.Reset();
+			SelectedMemberAssetPaths.Add(AssetPath);
+		}
+		MemberSelectionAnchorAssetPath = AssetPath;
+	}
+	else if (bIsShiftClick && !MemberSelectionAnchorAssetPath.IsEmpty())
+	{
+		int32 AnchorIndex = INDEX_NONE;
+		int32 ClickedIndex = INDEX_NONE;
+		for (int32 Index = 0; Index < CurrentMemberItems.Num(); ++Index)
+		{
+			if (CurrentMemberItems[Index].IsValid())
+			{
+				if (CurrentMemberItems[Index]->AssetPath == MemberSelectionAnchorAssetPath)
+				{
+					AnchorIndex = Index;
+				}
+				if (CurrentMemberItems[Index]->AssetPath == AssetPath)
+				{
+					ClickedIndex = Index;
+				}
+			}
+		}
+
+		if (AnchorIndex != INDEX_NONE && ClickedIndex != INDEX_NONE)
+		{
+			SelectedMemberAssetPaths.Reset();
+			const int32 RangeStart = FMath::Min(AnchorIndex, ClickedIndex);
+			const int32 RangeEnd = FMath::Max(AnchorIndex, ClickedIndex);
+			for (int32 Index = RangeStart; Index <= RangeEnd; ++Index)
+			{
+				if (CurrentMemberItems[Index].IsValid())
+				{
+					SelectedMemberAssetPaths.Add(CurrentMemberItems[Index]->AssetPath);
+				}
+			}
+		}
+		else
+		{
+			SelectedMemberAssetPaths.Reset();
+			SelectedMemberAssetPaths.Add(AssetPath);
+		}
+	}
+	else if (bIsControlClick)
+	{
+		if (SelectedMemberAssetPaths.Contains(AssetPath))
+		{
+			SelectedMemberAssetPaths.Remove(AssetPath);
+		}
+		else
+		{
+			SelectedMemberAssetPaths.Add(AssetPath);
+		}
+		MemberSelectionAnchorAssetPath = AssetPath;
+	}
+	else
+	{
+		SelectedMemberAssetPaths.Reset();
+		SelectedMemberAssetPaths.Add(AssetPath);
+		MemberSelectionAnchorAssetPath = AssetPath;
+	}
+
+	if (DetailsBox.IsValid())
+	{
+		DetailsBox->Invalidate(EInvalidateWidget::Paint);
+	}
+}
+
+bool SAssetTabGroupsPanel::IsMemberSelected(const FString& AssetPath) const
+{
+	return SelectedMemberAssetPaths.Contains(AssetPath);
+}
+
+void SAssetTabGroupsPanel::ReorderGroupFromDrop(
+	const FGuid SourceGroupId,
+	const FGuid TargetGroupId,
+	const bool bDropAfter)
+{
+	if (Subsystem == nullptr || Commands == nullptr || !SourceGroupId.IsValid() || !TargetGroupId.IsValid() || SourceGroupId == TargetGroupId)
+	{
+		return;
+	}
+
+	const TArray<FAssetTabGroup>& Groups = Subsystem->GetRepository().GetGroups();
+	const int32 SourceIndex = Groups.IndexOfByPredicate(
+		[&SourceGroupId](const FAssetTabGroup& Group)
+		{
+			return Group.Id == SourceGroupId;
+		});
+	const int32 TargetIndex = Groups.IndexOfByPredicate(
+		[&TargetGroupId](const FAssetTabGroup& Group)
+		{
+			return Group.Id == TargetGroupId;
+		});
+	if (SourceIndex == INDEX_NONE || TargetIndex == INDEX_NONE)
+	{
+		return;
+	}
+
+	int32 NewIndex = TargetIndex + (bDropAfter ? 1 : 0);
+	if (SourceIndex < TargetIndex)
+	{
+		--NewIndex;
+	}
+	if (NewIndex != SourceIndex)
+	{
+		Commands->ReorderGroup(SourceGroupId, NewIndex);
+	}
 }
 
 TSharedRef<ITableRow> SAssetTabGroupsPanel::GenerateGroupRow(
@@ -540,8 +988,12 @@ TSharedRef<ITableRow> SAssetTabGroupsPanel::GenerateGroupRow(
 		RowContent = MakeGroupRowWidget(*Group);
 	}
 
-	return SNew(STableRow<TSharedPtr<FGuid>>, OwnerTable)
-		.Style(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.TableRow"))
+	return SNew(AssetTabGroupsPrivate::SAssetTabGroupRow, OwnerTable)
+		.GroupId(GroupId)
+		.OnDropRequested_Lambda([this](const FGuid& TargetGroupId, const FGuid& SourceGroupId, bool bDropAfter)
+		{
+			ReorderGroupFromDrop(SourceGroupId, TargetGroupId, bDropAfter);
+		})
 	[
 		RowContent
 	];
@@ -574,6 +1026,19 @@ TSharedRef<SWidget> SAssetTabGroupsPanel::MakeGroupRowWidget(const FAssetTabGrou
 		})
 		[
 			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.Padding(0.0f, 0.0f, 6.0f, 0.0f)
+			.VAlign(VAlign_Center)
+			[
+				SNew(AssetTabGroupsPrivate::SAssetTabGroupDragHandle)
+				.ToolTipText(LOCTEXT("GroupDragHandleTooltip", "Drag to reorder this asset group."))
+				.OnDragDetected_Lambda([GroupId = Group.Id, GroupName = Group.Name](const FGeometry&, const FPointerEvent&)
+				{
+					return FReply::Handled().BeginDragDrop(
+						AssetTabGroupsPrivate::FAssetTabGroupDragDropOp::New(GroupId, GroupName));
+				})
+			]
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.Padding(0.0f, 0.0f, 6.0f, 0.0f)
@@ -748,20 +1213,36 @@ TSharedRef<SWidget> SAssetTabGroupsPanel::MakeMemberTile(const FAssetTabGroupMem
 		.ColorAndOpacity(bMemberMissing ? AssetTabGroupsCompat::GetMissingForegroundColor() : FSlateColor::UseForeground())
 	];
 
+	VisualContent->AddSlot()
+	.AutoHeight()
+	.Padding(0.0f, 4.0f, 0.0f, 0.0f)
+	[
+		SNew(STextBlock)
+		.Text(FText::FromString(Member.PackagePath))
+		.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+	];
+
 	return SNew(SBox)
 		.WidthOverride(160.0f)
 		.Padding(4.0f)
 		[
 			SNew(SBorder)
 			.BorderImage(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.PanelBackground")))
-			.BorderBackgroundColor(bMemberMissing
-				? AssetTabGroupsCompat::GetMissingTileBackgroundColor()
-				: AssetTabGroupsCompat::GetTileBackgroundColor())
+			.BorderBackgroundColor_Lambda([this, AssetPath, bMemberMissing]()
+			{
+				if (IsMemberSelected(AssetPath))
+				{
+					return FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.TileSelection"))->TintColor;
+				}
+
+				return FSlateColor(bMemberMissing
+					? AssetTabGroupsCompat::GetMissingTileBackgroundColor()
+					: AssetTabGroupsCompat::GetTileBackgroundColor());
+			})
 			.Padding(5.0f)
 			[
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot()
-				.AutoHeight()
+				SNew(SOverlay)
+				+ SOverlay::Slot()
 				[
 					SNew(AssetTabGroupsPrivate::SAssetTabGroupMemberTile)
 					.OnDoubleClicked_Lambda([this, GroupId, AssetPath]()
@@ -769,25 +1250,38 @@ TSharedRef<SWidget> SAssetTabGroupsPanel::MakeMemberTile(const FAssetTabGroupMem
 						OpenMemberAsset(GroupId, AssetPath);
 						return FReply::Handled();
 					})
+					.OnSelectionRequested_Lambda([this, GroupId, AssetPath](const FPointerEvent& MouseEvent)
+					{
+						HandleMemberTileSelection(GroupId, AssetPath, MouseEvent);
+					})
 					.OnGetMenuContent_Lambda([this, GroupId, AssetPath, DisplayName]()
 					{
-						return MakeMemberMenu(GroupId, AssetPath, DisplayName);
+						return MakeTileMemberMenu(GroupId, AssetPath, DisplayName);
 					})
 					[
 						VisualContent
 					]
 				]
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(0.0f, 4.0f, 0.0f, 0.0f)
+				+ SOverlay::Slot()
+				.HAlign(HAlign_Right)
+				.VAlign(VAlign_Top)
+				.Padding(2.0f)
 				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot()
-					.FillWidth(1.0f)
+					SNew(SBorder)
+					.BorderImage(FAssetTabGroupsStyle::Get().GetBrush(TEXT("AssetTabGroups.TileSelection")))
+					.Padding(2.0f)
+					.Visibility_Lambda([this, AssetPath]()
+					{
+						return IsMemberSelected(AssetPath) ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+					})
 					[
-						SNew(STextBlock)
-						.Text(FText::FromString(Member.PackagePath))
-						.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+						SNew(SBox)
+						.WidthOverride(8.0f)
+						.HeightOverride(8.0f)
+						[
+							SNew(SColorBlock)
+							.Color(FLinearColor::White)
+						]
 					]
 				]
 			]
@@ -851,6 +1345,7 @@ TSharedRef<SWidget> SAssetTabGroupsPanel::MakeGroupDetails(const FAssetTabGroup&
 	[
 		SNew(SButton)
 		.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
+		ASSETTABGROUPS_BUTTON_TEXT_STYLE
 		.Text(ViewMode == EAssetTabGroupViewMode::List
 			? LOCTEXT("SwitchToTileView", "Tile")
 			: LOCTEXT("SwitchToListView", "List"))
@@ -867,6 +1362,7 @@ TSharedRef<SWidget> SAssetTabGroupsPanel::MakeGroupDetails(const FAssetTabGroup&
 	[
 		SNew(SButton)
 		.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
+		ASSETTABGROUPS_BUTTON_TEXT_STYLE
 		.Text(LOCTEXT("OpenGroup", "Open"))
 		.OnClicked_Lambda([this, GroupId = Group.Id]()
 		{
@@ -880,6 +1376,7 @@ TSharedRef<SWidget> SAssetTabGroupsPanel::MakeGroupDetails(const FAssetTabGroup&
 	[
 		SNew(SButton)
 		.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
+		ASSETTABGROUPS_BUTTON_TEXT_STYLE
 		.Text(LOCTEXT("FocusGroup", "Focus"))
 		.ToolTipText(LOCTEXT("FocusGroupTooltip", "Open this group and safely close clean asset editors outside it."))
 		.OnClicked_Lambda([this, GroupId = Group.Id]()
@@ -894,6 +1391,7 @@ TSharedRef<SWidget> SAssetTabGroupsPanel::MakeGroupDetails(const FAssetTabGroup&
 	[
 		SNew(SButton)
 		.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
+		ASSETTABGROUPS_BUTTON_TEXT_STYLE
 		.Text(LOCTEXT("AddOpenAssetsShort", "Add"))
 		.OnClicked_Lambda([this, GroupId = Group.Id]()
 		{
@@ -907,6 +1405,7 @@ TSharedRef<SWidget> SAssetTabGroupsPanel::MakeGroupDetails(const FAssetTabGroup&
 	[
 		SNew(SButton)
 		.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
+		ASSETTABGROUPS_BUTTON_TEXT_STYLE
 		.Text(LOCTEXT("AddSelectedContentBrowserAssetsShort", "Add Selected"))
 		.ToolTipText(LOCTEXT("AddSelectedContentBrowserAssetsShortTooltip", "Add assets currently selected in the primary Content Browser."))
 		.OnClicked_Lambda([this, GroupId = Group.Id]()
@@ -921,6 +1420,7 @@ TSharedRef<SWidget> SAssetTabGroupsPanel::MakeGroupDetails(const FAssetTabGroup&
 	[
 		SNew(SButton)
 		.ButtonStyle(FAssetTabGroupsStyle::Get(), TEXT("AssetTabGroups.FlatButton"))
+		ASSETTABGROUPS_BUTTON_TEXT_STYLE
 		.Text(LOCTEXT("UpdateOpenAssetsShort", "Update"))
 		.OnClicked_Lambda([this, GroupId = Group.Id]()
 		{
@@ -1103,6 +1603,8 @@ void SAssetTabGroupsPanel::ToggleViewMode()
 	ViewMode = ViewMode == EAssetTabGroupViewMode::List
 		? EAssetTabGroupViewMode::Tile
 		: EAssetTabGroupViewMode::List;
+	SelectedMemberAssetPaths.Reset();
+	MemberSelectionAnchorAssetPath.Reset();
 	RebuildDetails();
 }
 
@@ -1303,6 +1805,80 @@ void SAssetTabGroupsPanel::OpenMemberAsset(const FGuid GroupId, const FString& A
 	}
 }
 
+void SAssetTabGroupsPanel::OpenSelectedMembers(const FGuid GroupId)
+{
+	if (Commands == nullptr || Subsystem == nullptr)
+	{
+		return;
+	}
+
+	TArray<FString> SelectedPaths;
+	for (const TSharedPtr<FAssetTabGroupMember>& Member : CurrentMemberItems)
+	{
+		if (Member.IsValid() && SelectedMemberAssetPaths.Contains(Member->AssetPath))
+		{
+			SelectedPaths.Add(Member->AssetPath);
+		}
+	}
+
+	FString LastOpenedAssetPath;
+	for (const FString& AssetPath : SelectedPaths)
+	{
+		if (Commands->OpenAsset(AssetPath))
+		{
+			LastOpenedAssetPath = AssetPath;
+		}
+	}
+	if (!LastOpenedAssetPath.IsEmpty())
+	{
+		Subsystem->GetRepository().SetActiveAsset(GroupId, LastOpenedAssetPath);
+	}
+}
+
+void SAssetTabGroupsPanel::RemoveSelectedMembers(const FGuid GroupId)
+{
+	if (Commands == nullptr)
+	{
+		return;
+	}
+
+	TArray<FString> SelectedPaths;
+	FString FirstDisplayName;
+	for (const TSharedPtr<FAssetTabGroupMember>& Member : CurrentMemberItems)
+	{
+		if (Member.IsValid() && SelectedMemberAssetPaths.Contains(Member->AssetPath))
+		{
+			SelectedPaths.Add(Member->AssetPath);
+			if (FirstDisplayName.IsEmpty())
+			{
+				FirstDisplayName = Member->DisplayName.IsEmpty() ? Member->AssetPath : Member->DisplayName;
+			}
+		}
+	}
+	if (SelectedPaths.Num() == 0)
+	{
+		return;
+	}
+
+	const FText ConfirmationText = SelectedPaths.Num() == 1
+		? FText::Format(
+			LOCTEXT("RemoveSelectedMemberConfirmation", "Remove '{0}' from this group?"),
+			FText::FromString(FirstDisplayName))
+		: FText::Format(
+			LOCTEXT("RemoveSelectedMembersConfirmation", "Remove {0} selected assets from this group?"),
+			FText::AsNumber(SelectedPaths.Num()));
+	if (FMessageDialog::Open(EAppMsgType::YesNo, ConfirmationText) != EAppReturnType::Yes)
+	{
+		return;
+	}
+
+	if (Commands->RemoveMembersFromGroup(GroupId, SelectedPaths))
+	{
+		SelectedMemberAssetPaths.Reset();
+		MemberSelectionAnchorAssetPath.Reset();
+	}
+}
+
 void SAssetTabGroupsPanel::AddContentBrowserAssets(const FGuid GroupId)
 {
 	if (Commands == nullptr)
@@ -1423,6 +1999,39 @@ TSharedRef<SWidget> SAssetTabGroupsPanel::MakeMemberMenu(
 				Commands->RemoveMemberFromGroup(GroupId, AssetPath);
 			}
 		})));
+	return MenuBuilder.MakeWidget();
+}
+
+TSharedRef<SWidget> SAssetTabGroupsPanel::MakeTileMemberMenu(
+	const FGuid GroupId,
+	const FString& AssetPath,
+	const FString& DisplayName)
+{
+	if (SelectedMemberAssetPaths.Num() <= 1)
+	{
+		return MakeMemberMenu(GroupId, AssetPath, DisplayName);
+	}
+
+	const FText SelectedCountText = FText::AsNumber(SelectedMemberAssetPaths.Num());
+	FMenuBuilder MenuBuilder(true, nullptr);
+	MenuBuilder.BeginSection("AssetTabGroupSelectedMembers", LOCTEXT("SelectedMembersHeading", "Selected Assets"));
+	MenuBuilder.AddMenuEntry(
+		FText::Format(LOCTEXT("MenuOpenSelectedMembers", "Open Selected Assets ({0})"), SelectedCountText),
+		LOCTEXT("MenuOpenSelectedMembersTooltip", "Open and focus all currently selected assets."),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateLambda([this, GroupId]()
+		{
+			OpenSelectedMembers(GroupId);
+		})));
+	MenuBuilder.AddMenuEntry(
+		FText::Format(LOCTEXT("MenuRemoveSelectedMembers", "Remove Selected From Group ({0})"), SelectedCountText),
+		LOCTEXT("MenuRemoveSelectedMembersTooltip", "Remove all currently selected asset references from this group."),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateLambda([this, GroupId]()
+		{
+			RemoveSelectedMembers(GroupId);
+		})));
+	MenuBuilder.EndSection();
 	return MenuBuilder.MakeWidget();
 }
 
@@ -1988,4 +2597,5 @@ bool SAssetTabGroupsPanel::PromptForOpenAssetSelection(
 	return true;
 }
 
+#undef ASSETTABGROUPS_BUTTON_TEXT_STYLE
 #undef LOCTEXT_NAMESPACE

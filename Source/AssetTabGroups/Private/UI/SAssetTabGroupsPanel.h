@@ -15,6 +15,7 @@ class SVerticalBox;
 class FAssetThumbnail;
 class FAssetThumbnailPool;
 class UAssetTabGroupsSubsystem;
+struct FPointerEvent;
 
 enum class EAssetTabGroupViewMode : uint8
 {
@@ -39,9 +40,14 @@ private:
 	void RebuildDetails();
 	void HandleGroupsChanged();
 	void GroupSelectionChanged(TSharedPtr<FGuid> GroupId, ESelectInfo::Type SelectInfo);
+	void ReorderGroupFromDrop(const FGuid SourceGroupId, const FGuid TargetGroupId, bool bDropAfter);
 	TSharedRef<ITableRow> GenerateGroupRow(TSharedPtr<FGuid> GroupId, const TSharedRef<STableViewBase>& OwnerTable);
 	TSharedRef<ITableRow> GenerateMemberRow(TSharedPtr<FAssetTabGroupMember> Member, const TSharedRef<STableViewBase>& OwnerTable);
 	TSharedRef<SWidget> MakeMemberTile(const FAssetTabGroupMember& Member);
+	void HandleMemberTileSelection(const FGuid GroupId, const FString& AssetPath, const FPointerEvent& MouseEvent);
+	bool IsMemberSelected(const FString& AssetPath) const;
+	void OpenSelectedMembers(const FGuid GroupId);
+	void RemoveSelectedMembers(const FGuid GroupId);
 	void ToggleViewMode();
 
 	TSharedRef<SWidget> MakeGroupRowWidget(const FAssetTabGroup& Group);
@@ -50,6 +56,7 @@ private:
 	TSharedRef<SWidget> MakeEmptyGroupMenu();
 	TSharedRef<SWidget> MakeGroupDetailsMenu(const FGuid GroupId);
 	TSharedRef<SWidget> MakeMemberMenu(const FGuid GroupId, const FString& AssetPath, const FString& DisplayName);
+	TSharedRef<SWidget> MakeTileMemberMenu(const FGuid GroupId, const FString& AssetPath, const FString& DisplayName);
 	TSharedRef<SWidget> MakeColorMenu(const FGuid GroupId);
 
 	void OpenGroup(const FGuid GroupId);
@@ -83,6 +90,8 @@ private:
 	TArray<TSharedPtr<FAssetTabGroupMember>> CurrentMemberItems;
 	TSharedPtr<FAssetThumbnailPool> ThumbnailPool;
 	TArray<TSharedPtr<FAssetThumbnail>> ActiveThumbnails;
+	TSet<FString> SelectedMemberAssetPaths;
+	FString MemberSelectionAnchorAssetPath;
 	FGuid SelectedGroupId;
 	FGuid PendingGroupContextMenuId;
 	FGuid PendingMemberContextMenuGroupId;
